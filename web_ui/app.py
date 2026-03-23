@@ -227,15 +227,18 @@ def show_chat(config: WebUIConfig):
         st.caption(st.session_state.user_email)
         st.divider()
 
-        # Qlik app selector (populated after first MCP connection)
+        # Qlik app selector with search (type to filter)
         app_names = ["(All apps)"] + [a["name"] for a in st.session_state.qlik_apps]
         selected = st.selectbox(
             "Focus on Qlik App",
             options=app_names,
             index=app_names.index(st.session_state.selected_app)
                   if st.session_state.selected_app in app_names else 0,
+            help="Type to search apps",
         )
-        st.session_state.selected_app = selected
+        if selected != st.session_state.selected_app:
+            st.session_state.selected_app = selected
+            st.rerun()
 
         st.divider()
 
@@ -279,13 +282,39 @@ def show_chat(config: WebUIConfig):
                 del st.session_state[key]
             st.rerun()
 
+    # --- App selector bar (inline, above chat) ---
+    app_names = ["(All apps)"] + [a["name"] for a in st.session_state.qlik_apps]
+    col_label, col_select = st.columns([1, 4])
+    with col_label:
+        st.markdown("**App focus:**")
+    with col_select:
+        inline_selected = st.selectbox(
+            "Select app",
+            options=app_names,
+            index=app_names.index(st.session_state.selected_app)
+                  if st.session_state.selected_app in app_names else 0,
+            label_visibility="collapsed",
+            key="inline_app_select",
+            help="Type to search — switch app focus mid-conversation",
+        )
+        if inline_selected != st.session_state.selected_app:
+            st.session_state.selected_app = inline_selected
+            st.rerun()
+
+    if st.session_state.selected_app != "(All apps)":
+        st.info(f"Asking about: **{st.session_state.selected_app}**", icon="🎯")
+
+    st.divider()
+
     # --- Chat history ---
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     # --- Chat input ---
-    if user_input := st.chat_input("Ask about your Qlik data..."):
+    app = st.session_state.selected_app
+    placeholder = f"Ask about {app}..." if app != "(All apps)" else "Ask about your Qlik data..."
+    if user_input := st.chat_input(placeholder):
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
