@@ -13,8 +13,6 @@ from web_ui.bedrock_client import chat_with_tools, SYSTEM_PROMPT
 from web_ui import db
 
 
-def get_cookie_manager():
-    return stx.CookieManager(key="qlik_cookies")
 
 
 # ---------------------------------------------------------------------------
@@ -33,7 +31,7 @@ def get_event_loop():
     return loop
 
 
-def init_session_state():
+def init_session_state(cookie_mgr):
     defaults = {
         "logged_in":     False,
         "user_name":     "",
@@ -54,7 +52,6 @@ def init_session_state():
 
     # Auto-login from browser cookie
     if not st.session_state.logged_in:
-        cookie_mgr = get_cookie_manager()
         saved_email = cookie_mgr.get("qlik_user_email")
         saved_name  = cookie_mgr.get("qlik_user_name")
         if saved_email and saved_name:
@@ -83,11 +80,14 @@ async def load_qlik_apps(bridge: MCPBridge) -> list[dict]:
     try:
         raw = await bridge.call_tool("get_apps", {})
         data = json.loads(raw)
+        # Response is {"apps": [...], "pagination": {...}} or a plain list
+        if isinstance(data, dict):
+            data = data.get("apps", [])
         if isinstance(data, list):
             apps = []
             for item in data:
                 if isinstance(item, dict):
-                    app_id   = item.get("id") or item.get("appId") or item.get("qDocId", "")
+                    app_id   = item.get("guid") or item.get("id") or item.get("appId") or item.get("qDocId", "")
                     app_name = item.get("name") or item.get("appName") or item.get("qDocName", app_id)
                     if app_id:
                         apps.append({"id": app_id, "name": app_name})
@@ -160,7 +160,7 @@ async def handle_user_message(user_input: str, config: WebUIConfig):
 # Login screen
 # ---------------------------------------------------------------------------
 
-def show_login(config: WebUIConfig):
+def show_login(config: WebUIConfig, cookie_mgr):
     st.set_page_config(
         page_title=config.app_title,
         page_icon=config.page_icon,
@@ -188,7 +188,6 @@ def show_login(config: WebUIConfig):
             st.session_state.user_email = email
             st.session_state.logged_in  = True
             expires = datetime.now() + timedelta(days=30)
-            cookie_mgr = get_cookie_manager()
             cookie_mgr.set("qlik_user_email", email, expires_at=expires)
             cookie_mgr.set("qlik_user_name",  name,  expires_at=expires)
             st.rerun()
@@ -198,7 +197,7 @@ def show_login(config: WebUIConfig):
 # Main chat UI
 # ---------------------------------------------------------------------------
 
-def show_chat(config: WebUIConfig):
+def show_chat(config: WebUIConfig, cookie_mgr):
     st.set_page_config(
         page_title=config.app_title,
         page_icon=config.page_icon,
@@ -274,7 +273,6 @@ def show_chat(config: WebUIConfig):
             st.rerun()
 
         if st.button("Sign out"):
-            cookie_mgr = get_cookie_manager()
             cookie_mgr.delete("qlik_user_email")
             cookie_mgr.delete("qlik_user_name")
             for key in list(st.session_state.keys()):
@@ -339,12 +337,13 @@ def show_chat(config: WebUIConfig):
 def main():
     db.init_db()
     config = WebUIConfig.from_env()
-    init_session_state()
+    cookie_mgr = stx.CookieManager()   # created ONCE per render cycle
+    init_session_state(cookie_mgr)
 
     if not st.session_state.logged_in:
-        show_login(config)
+        show_login(config, cookie_mgr)
     else:
-        show_chat(config)
+        show_chat(config, cookie_mgr)
 
 
 if __name__ == "__main__":
