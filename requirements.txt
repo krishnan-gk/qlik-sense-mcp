@@ -8,4 +8,3 @@ websocket-client>=1.6.0
 # Web UI (Streamlit + Claude)
 streamlit>=1.30.0
 anthropic[bedrock]>=0.40.0
-extra-streamlit-components>=0.1.60

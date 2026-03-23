@@ -2,10 +2,8 @@
 
 import asyncio
 import json
-from datetime import datetime, timedelta
 
 import streamlit as st
-import extra_streamlit_components as stx
 
 from web_ui.config import WebUIConfig
 from web_ui.mcp_bridge import MCPBridge
@@ -31,7 +29,7 @@ def get_event_loop():
     return loop
 
 
-def init_session_state(cookie_mgr):
+def init_session_state():
     defaults = {
         "logged_in":     False,
         "user_name":     "",
@@ -50,10 +48,10 @@ def init_session_state(cookie_mgr):
         if key not in st.session_state:
             st.session_state[key] = val
 
-    # Auto-login from browser cookie
+    # Auto-login from URL query params (persists across page refreshes)
     if not st.session_state.logged_in:
-        saved_email = cookie_mgr.get("qlik_user_email")
-        saved_name  = cookie_mgr.get("qlik_user_name")
+        saved_email = st.query_params.get("qe", "")
+        saved_name  = st.query_params.get("qn", "")
         if saved_email and saved_name:
             db.upsert_user(saved_name, saved_email)
             st.session_state.user_name  = saved_name
@@ -160,7 +158,7 @@ async def handle_user_message(user_input: str, config: WebUIConfig):
 # Login screen
 # ---------------------------------------------------------------------------
 
-def show_login(config: WebUIConfig, cookie_mgr):
+def show_login(config: WebUIConfig):
     st.set_page_config(
         page_title=config.app_title,
         page_icon=config.page_icon,
@@ -187,9 +185,9 @@ def show_login(config: WebUIConfig, cookie_mgr):
             st.session_state.user_name  = name
             st.session_state.user_email = email
             st.session_state.logged_in  = True
-            expires = datetime.now() + timedelta(days=30)
-            cookie_mgr.set("qlik_user_email", email, expires_at=expires)
-            cookie_mgr.set("qlik_user_name",  name,  expires_at=expires)
+            # Persist login in URL — survives page refreshes
+            st.query_params["qe"] = email
+            st.query_params["qn"] = name
             st.rerun()
 
 
@@ -197,7 +195,7 @@ def show_login(config: WebUIConfig, cookie_mgr):
 # Main chat UI
 # ---------------------------------------------------------------------------
 
-def show_chat(config: WebUIConfig, cookie_mgr):
+def show_chat(config: WebUIConfig):
     st.set_page_config(
         page_title=config.app_title,
         page_icon=config.page_icon,
@@ -273,8 +271,7 @@ def show_chat(config: WebUIConfig, cookie_mgr):
             st.rerun()
 
         if st.button("Sign out"):
-            cookie_mgr.delete("qlik_user_email")
-            cookie_mgr.delete("qlik_user_name")
+            st.query_params.clear()
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
@@ -337,13 +334,12 @@ def show_chat(config: WebUIConfig, cookie_mgr):
 def main():
     db.init_db()
     config = WebUIConfig.from_env()
-    cookie_mgr = stx.CookieManager()   # created ONCE per render cycle
-    init_session_state(cookie_mgr)
+    init_session_state()
 
     if not st.session_state.logged_in:
-        show_login(config, cookie_mgr)
+        show_login(config)
     else:
-        show_chat(config, cookie_mgr)
+        show_chat(config)
 
 
 if __name__ == "__main__":
