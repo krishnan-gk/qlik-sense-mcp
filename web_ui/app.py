@@ -43,6 +43,7 @@ def init_session_state():
         "qlik_apps":     [],       # [{"id": ..., "name": ...}]
         "apps_loaded":   False,
         "selected_app":  "(All apps)",
+        "show_admin":    False,
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -192,10 +193,74 @@ def show_login(config: WebUIConfig):
 
 
 # ---------------------------------------------------------------------------
+# Admin panel
+# ---------------------------------------------------------------------------
+
+def show_admin_panel(config: WebUIConfig):
+    st.title("Admin Panel — App Access Control")
+    if st.button("← Back to Chat"):
+        st.session_state.show_admin = False
+        st.rerun()
+    st.caption("Enable or disable Qlik apps visible to users. Changes take effect immediately.")
+
+    all_apps = db.get_all_apps()
+    if not all_apps:
+        st.warning("No apps loaded yet. Go back to chat — apps sync automatically on first load.")
+        return
+
+    # Stream filter
+    streams = sorted(set(a["stream"] or "(No stream)" for a in all_apps))
+    selected_stream = st.selectbox("Filter by stream", ["(All streams)"] + streams)
+
+    # Bulk actions
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        st.markdown(f"**{len(all_apps)} apps total** — {sum(1 for a in all_apps if a['enabled'])} enabled")
+    with col2:
+        if st.button("Enable all in stream" if selected_stream != "(All streams)" else "Enable all"):
+            if selected_stream != "(All streams)":
+                db.set_stream_enabled(selected_stream if selected_stream != "(No stream)" else "", True)
+            else:
+                for a in all_apps:
+                    db.set_app_enabled(a["id"], True)
+            st.rerun()
+    with col3:
+        if st.button("Disable all in stream" if selected_stream != "(All streams)" else "Disable all"):
+            if selected_stream != "(All streams)":
+                db.set_stream_enabled(selected_stream if selected_stream != "(No stream)" else "", False)
+            else:
+                for a in all_apps:
+                    db.set_app_enabled(a["id"], False)
+            st.rerun()
+
+    st.divider()
+
+    # App list with toggles
+    filtered = [a for a in all_apps
+                if selected_stream == "(All streams)"
+                or (a["stream"] or "(No stream)") == selected_stream]
+
+    for app in filtered:
+        col_name, col_stream, col_toggle = st.columns([4, 2, 1])
+        with col_name:
+            st.markdown(f"**{app['name']}**")
+        with col_stream:
+            st.caption(app["stream"] or "(No stream)")
+        with col_toggle:
+            new_val = st.toggle("", value=app["enabled"], key=f"toggle_{app['id']}")
+            if new_val != app["enabled"]:
+                db.set_app_enabled(app["id"], new_val)
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Main chat UI
 # ---------------------------------------------------------------------------
 
 def show_chat(config: WebUIConfig):
+    if st.session_state.get("show_admin"):
+        show_admin_panel(config)
+        return
     st.set_page_config(
         page_title=config.app_title,
         page_icon=config.page_icon,
@@ -209,9 +274,12 @@ def show_chat(config: WebUIConfig):
     if not st.session_state.apps_loaded:
         with st.spinner("Connecting to Qlik..."):
             try:
-                bridge = loop.run_until_complete(ensure_mcp_connected(config))
-                apps   = loop.run_until_complete(load_qlik_apps(bridge))
-                st.session_state.qlik_apps   = apps
+                bridge   = loop.run_until_complete(ensure_mcp_connected(config))
+                all_apps = loop.run_until_complete(load_qlik_apps(bridge))
+                if all_apps:
+                    db.sync_apps(all_apps)          # sync all apps into allowlist DB
+                # Users only see enabled apps
+                st.session_state.qlik_apps   = db.get_enabled_apps()
                 st.session_state.apps_loaded = True
                 st.rerun()
             except Exception:
@@ -275,6 +343,13 @@ def show_chat(config: WebUIConfig):
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
+
+        # Admin panel button — visible only to admin emails
+        if st.session_state.user_email.lower() in [e.lower() for e in config.admin_emails]:
+            st.divider()
+            if st.button("Admin Panel"):
+                st.session_state.show_admin = True
+                st.rerun()
 
     # --- App selector bar (inline, above chat) ---
     app_names = ["(All apps)"] + [a["name"] for a in st.session_state.qlik_apps]

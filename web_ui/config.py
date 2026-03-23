@@ -35,6 +35,7 @@ class WebUIConfig:
     # --- UI settings ---
     app_title: str = "Qlik Sense AI Assistant"
     page_icon: str = "📊"
+    admin_emails: list = field(default_factory=list)  # emails allowed to access admin panel
 
     @classmethod
     def from_env(cls, dotenv_path: Optional[str] = None) -> "WebUIConfig":
@@ -56,6 +57,7 @@ class WebUIConfig:
             qlik_proxy_port=os.getenv("QLIK_PROXY_PORT", "4243"),
             qlik_engine_port=os.getenv("QLIK_ENGINE_PORT", "4747"),
             qlik_http_port=os.getenv("QLIK_HTTP_PORT", "443"),
+            admin_emails=[e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()],
         )
 
     def to_qlik_env(self) -> dict:

@@ -30,6 +30,14 @@ def init_db() -> None:
                 last_seen  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
 
+            CREATE TABLE IF NOT EXISTS app_allowlist (
+                app_guid   TEXT PRIMARY KEY,
+                app_name   TEXT NOT NULL,
+                stream     TEXT DEFAULT '',
+                enabled    INTEGER DEFAULT 1,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS messages (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id    TEXT    NOT NULL,
@@ -123,3 +131,62 @@ def session_totals(session_id: str) -> dict:
         "output_tokens": row["output_tokens"] or 0,
         "cost_usd":      row["cost_usd"]      or 0.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# App allowlist (admin-controlled)
+# ---------------------------------------------------------------------------
+
+def sync_apps(apps: list) -> None:
+    """Upsert all apps from Qlik into allowlist. New apps default to enabled=1."""
+    with _connect() as conn:
+        for app in apps:
+            conn.execute("""
+                INSERT INTO app_allowlist (app_guid, app_name, stream, enabled)
+                VALUES (?, ?, ?, 1)
+                ON CONFLICT(app_guid) DO UPDATE SET
+                    app_name = excluded.app_name,
+                    stream   = excluded.stream,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (app["id"], app["name"], app.get("stream", "")))
+
+
+def get_enabled_apps() -> list:
+    """Return apps currently enabled in the allowlist."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT app_guid, app_name, stream FROM app_allowlist WHERE enabled=1 ORDER BY app_name"
+        ).fetchall()
+    return [{"id": r["app_guid"], "name": r["app_name"], "stream": r["stream"]} for r in rows]
+
+
+def get_all_apps() -> list:
+    """Return all apps with enabled status — for admin panel."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT app_guid, app_name, stream, enabled FROM app_allowlist ORDER BY stream, app_name"
+        ).fetchall()
+    return [{"id": r["app_guid"], "name": r["app_name"], "stream": r["stream"], "enabled": bool(r["enabled"])} for r in rows]
+
+
+def set_app_enabled(app_guid: str, enabled: bool) -> None:
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE app_allowlist SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE app_guid=?",
+            (1 if enabled else 0, app_guid)
+        )
+
+
+def set_stream_enabled(stream: str, enabled: bool) -> None:
+    """Enable or disable all apps in a stream at once."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE app_allowlist SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE stream=?",
+            (1 if enabled else 0, stream)
+        )
+
+
+def allowlist_empty() -> bool:
+    with _connect() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM app_allowlist").fetchone()[0]
+    return count == 0
