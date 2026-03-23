@@ -1,0 +1,90 @@
+# =============================================================================
+# Qlik Sense MCP — Central Server Deployment (Option B)
+# =============================================================================
+# One mcpo container per user, each with their own QLIK_USER_ID.
+# Section Access is enforced automatically — each user only sees their data.
+#
+# Usage:
+#   1. Create per-user env files in ./users/<username>.env
+#      (copy from users/template.env, fill in their credentials)
+#   2. docker compose up -d
+#   3. Users connect via: https://qlik-mcp.ispot.tv/<username>/
+#
+# Add a new user:
+#   bash add_user.sh <username> <email> <port>
+#
+# Requirements: Docker, Docker Compose, nginx (see nginx.conf)
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Template — copy this block for each new user, change:
+  #   - service name (qlik-mcp-<username>)
+  #   - env_file path
+  #   - ports (increment by 1 per user, starting at 8001)
+  # ---------------------------------------------------------------------------
+
+  qlik-mcp-template:
+    image: ghcr.io/open-webui/mcpo:latest
+    command: ["--port", "8000", "--", "python", "-m", "qlik_sense_mcp_server.server"]
+    env_file: ./users/template.env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./certs:/certs:ro          # shared certs dir — mount per-user certs here
+    restart: unless-stopped
+    profiles: ["template"]         # excluded from default 'up' — remove this line for real users
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Example user: alice
+  # Port 8001 → nginx routes /alice/ → this container
+  # ---------------------------------------------------------------------------
+  # qlik-mcp-alice:
+  #   image: ghcr.io/open-webui/mcpo:latest
+  #   command: ["--port", "8001", "--", "python", "-m", "qlik_sense_mcp_server.server"]
+  #   env_file: ./users/alice.env
+  #   ports:
+  #     - "8001:8001"
+  #   volumes:
+  #     - ./certs:/certs:ro
+  #   restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Example user: bob (port 8002)
+  # ---------------------------------------------------------------------------
+  # qlik-mcp-bob:
+  #   image: ghcr.io/open-webui/mcpo:latest
+  #   command: ["--port", "8002", "--", "python", "-m", "qlik_sense_mcp_server.server"]
+  #   env_file: ./users/bob.env
+  #   ports:
+  #     - "8002:8002"
+  #   volumes:
+  #     - ./certs:/certs:ro
+  #   restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # nginx reverse proxy (optional — comment out if nginx is managed externally)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro              # your TLS certs for the proxy domain
+    depends_on: []
+    restart: unless-stopped
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  default:
+    name: qlik-mcp-net

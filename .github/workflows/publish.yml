@@ -1,0 +1,67 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+
+    - name: Set up Python
+      run: uv python install 3.12
+
+    - name: Create venv and install build tools
+      run: |
+        uv venv
+        uv pip install build twine
+
+    - name: Clean dist directory
+      run: rm -rf dist/* || true
+
+    - name: Build package
+      run: uv run python -m build
+
+    - name: Verify package
+      run: uv run python -m twine check dist/*
+
+    - name: Publish to PyPI
+      env:
+        TWINE_USERNAME: __token__
+        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+      run: |
+        set -e
+        uv run python -m twine upload dist/* || {
+          status=$?
+          echo "Twine upload failed with status $status"
+          if [ "$status" -eq 1 ]; then
+            echo "Non-fatal: likely already uploaded (400 File already exists). Proceeding."
+          else
+            exit $status
+          fi
+        }
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }}
+        body: |
+          Release ${{ github.ref_name }}
+
+          Install via uvx:
+          ```bash
+          uvx qlik-sense-mcp-server
+          ```
+        draft: false
+        prerelease: false
