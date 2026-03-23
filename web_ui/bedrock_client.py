@@ -35,7 +35,8 @@ async def chat_with_tools(
     model: str = "claude-sonnet-4-6",
     bedrock_model: str = "us.anthropic.claude-sonnet-4-6-20250514",
     max_tokens: int = 4096,
-) -> tuple[str, list[dict]]:
+    system_prompt: str = SYSTEM_PROMPT,
+) -> tuple[str, list[dict], dict]:
     """Send messages to Claude, handle tool calls, return final response.
 
     Auto-selects backend:
@@ -43,20 +44,28 @@ async def chat_with_tools(
       - Otherwise            → uses AWS Bedrock (IAM role / access keys)
 
     Returns:
-        (response_text, updated_messages)
+        (response_text, updated_messages, usage)
+        where usage = {"input_tokens": int, "output_tokens": int}
     """
     client = _make_client(anthropic_api_key=anthropic_api_key, aws_region=aws_region)
     active_model = model if anthropic_api_key else bedrock_model
+
+    total_input  = 0
+    total_output = 0
 
     # Agentic loop — keep going until Claude gives a final text response
     while True:
         response = client.messages.create(
             model=active_model,
             max_tokens=max_tokens,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
             tools=tools,
         )
+
+        # Accumulate token usage across all turns
+        total_input  += getattr(response.usage, "input_tokens",  0)
+        total_output += getattr(response.usage, "output_tokens", 0)
 
         # Collect the assistant's content blocks
         assistant_content = []
@@ -76,7 +85,8 @@ async def chat_with_tools(
         # If no tool calls, we're done
         if response.stop_reason != "tool_use":
             text_parts = [b.text for b in response.content if b.type == "text"]
-            return "\n".join(text_parts), messages
+            usage = {"input_tokens": total_input, "output_tokens": total_output}
+            return "\n".join(text_parts), messages, usage
 
         # Execute each tool call and build tool_result messages
         tool_results = []

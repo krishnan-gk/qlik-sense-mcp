@@ -1,15 +1,20 @@
 """Qlik Sense AI Assistant — Streamlit Chat UI powered by Claude via Bedrock."""
 
 import asyncio
+import json
 import streamlit as st
 
 from web_ui.config import WebUIConfig
 from web_ui.mcp_bridge import MCPBridge
-from web_ui.bedrock_client import chat_with_tools
+from web_ui.bedrock_client import chat_with_tools, SYSTEM_PROMPT
+from web_ui import db
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def get_event_loop():
-    """Get or create an asyncio event loop for Streamlit."""
     try:
         loop = asyncio.get_event_loop()
         if loop.is_closed():
@@ -21,22 +26,27 @@ def get_event_loop():
     return loop
 
 
-def init_session_state(config: WebUIConfig):
-    """Initialize Streamlit session state."""
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = []  # API-format messages for Bedrock
-    if "mcp_bridge" not in st.session_state:
-        st.session_state.mcp_bridge = None
-    if "mcp_tools" not in st.session_state:
-        st.session_state.mcp_tools = []
-    if "mcp_connected" not in st.session_state:
-        st.session_state.mcp_connected = False
+def init_session_state():
+    defaults = {
+        "logged_in":     False,
+        "user_name":     "",
+        "user_email":    "",
+        "session_id":    db.new_session_id(),
+        "messages":      [],       # display messages [{role, content}]
+        "chat_messages": [],       # API-format messages for Claude
+        "mcp_bridge":    None,
+        "mcp_tools":     [],
+        "mcp_connected": False,
+        "qlik_apps":     [],       # [{"id": ..., "name": ...}]
+        "apps_loaded":   False,
+        "selected_app":  "(All apps)",
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
 
 
 async def ensure_mcp_connected(config: WebUIConfig) -> MCPBridge:
-    """Connect to the MCP server if not already connected."""
     if st.session_state.mcp_bridge and st.session_state.mcp_connected:
         return st.session_state.mcp_bridge
 
@@ -44,23 +54,57 @@ async def ensure_mcp_connected(config: WebUIConfig) -> MCPBridge:
     await bridge.connect()
     tools = await bridge.list_tools()
 
-    st.session_state.mcp_bridge = bridge
-    st.session_state.mcp_tools = tools
+    st.session_state.mcp_bridge    = bridge
+    st.session_state.mcp_tools     = tools
     st.session_state.mcp_connected = True
     return bridge
 
 
+async def load_qlik_apps(bridge: MCPBridge) -> list[dict]:
+    """Fetch app list from Qlik via MCP and return [{id, name}]."""
+    try:
+        raw = await bridge.call_tool("get_apps", {})
+        data = json.loads(raw)
+        if isinstance(data, list):
+            apps = []
+            for item in data:
+                if isinstance(item, dict):
+                    app_id   = item.get("id") or item.get("appId") or item.get("qDocId", "")
+                    app_name = item.get("name") or item.get("appName") or item.get("qDocName", app_id)
+                    if app_id:
+                        apps.append({"id": app_id, "name": app_name})
+            return apps
+    except Exception:
+        pass
+    return []
+
+
+def build_system_prompt() -> str:
+    """Inject selected-app context into the base system prompt."""
+    app = st.session_state.selected_app
+    if app and app != "(All apps)":
+        apps = st.session_state.qlik_apps
+        app_obj = next((a for a in apps if a["name"] == app), None)
+        extra = f"\n\nThe user has selected the Qlik app: **{app}**"
+        if app_obj:
+            extra += f" (ID: {app_obj['id']})"
+        extra += ". Focus all queries on this app unless the user explicitly asks about another."
+        return SYSTEM_PROMPT + extra
+    return SYSTEM_PROMPT
+
+
 async def handle_user_message(user_input: str, config: WebUIConfig):
-    """Process a user message through Claude + MCP tools."""
     bridge = await ensure_mcp_connected(config)
 
-    # Add user message to API history
-    st.session_state.chat_messages.append({
-        "role": "user",
-        "content": user_input,
-    })
+    # Load app list once after first MCP connection
+    if not st.session_state.apps_loaded:
+        apps = await load_qlik_apps(bridge)
+        st.session_state.qlik_apps  = apps
+        st.session_state.apps_loaded = True
 
-    response_text, updated_messages = await chat_with_tools(
+    st.session_state.chat_messages.append({"role": "user", "content": user_input})
+
+    response_text, updated_messages, usage = await chat_with_tools(
         messages=st.session_state.chat_messages,
         tools=st.session_state.mcp_tools,
         mcp=bridge,
@@ -69,36 +113,94 @@ async def handle_user_message(user_input: str, config: WebUIConfig):
         model=config.claude_model,
         bedrock_model=config.bedrock_model,
         max_tokens=config.max_tokens,
+        system_prompt=build_system_prompt(),
     )
 
     st.session_state.chat_messages = updated_messages
+
+    # Persist to SQLite
+    selected = st.session_state.selected_app
+    apps     = st.session_state.qlik_apps
+    app_obj  = next((a for a in apps if a["name"] == selected), None)
+
+    db.log_message(
+        session_id    = st.session_state.session_id,
+        user_email    = st.session_state.user_email,
+        user_name     = st.session_state.user_name,
+        question      = user_input,
+        answer        = response_text,
+        input_tokens  = usage["input_tokens"],
+        output_tokens = usage["output_tokens"],
+        qlik_app_id   = app_obj["id"]   if app_obj else "",
+        qlik_app_name = app_obj["name"] if app_obj else "",
+    )
+
     return response_text
 
 
-def main():
-    config = WebUIConfig.from_env()
+# ---------------------------------------------------------------------------
+# Login screen
+# ---------------------------------------------------------------------------
 
+def show_login(config: WebUIConfig):
+    st.set_page_config(
+        page_title=config.app_title,
+        page_icon=config.page_icon,
+        layout="centered",
+    )
+    st.title(f"{config.page_icon} {config.app_title}")
+    st.subheader("Sign in to continue")
+    st.caption("Enter your name and work email — no password required.")
+
+    with st.form("login_form"):
+        name  = st.text_input("Your Name",   placeholder="e.g. Krishnan Govindan")
+        email = st.text_input("Work Email",  placeholder="you@ispot.tv")
+        submitted = st.form_submit_button("Continue →", use_container_width=True)
+
+    if submitted:
+        name  = name.strip()
+        email = email.strip()
+        if not name:
+            st.error("Please enter your name.")
+        elif not email or "@" not in email:
+            st.error("Please enter a valid work email.")
+        else:
+            db.upsert_user(name, email)
+            st.session_state.user_name  = name
+            st.session_state.user_email = email
+            st.session_state.logged_in  = True
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Main chat UI
+# ---------------------------------------------------------------------------
+
+def show_chat(config: WebUIConfig):
     st.set_page_config(
         page_title=config.app_title,
         page_icon=config.page_icon,
         layout="wide",
     )
-
     st.title(f"{config.page_icon} {config.app_title}")
 
-    init_session_state(config)
+    loop = get_event_loop()
 
     # --- Sidebar ---
     with st.sidebar:
-        st.header("Settings")
-        st.text_input("Qlik User ID", value=config.qlik_user_id, disabled=True)
-        st.text_input("Qlik Server", value=config.qlik_server_url, disabled=True)
-        if config.use_anthropic_direct:
-            st.text_input("Claude Model", value=config.claude_model, disabled=True)
-            st.text_input("Auth", value="Anthropic API key", disabled=True)
-        else:
-            st.text_input("Claude Model", value=config.bedrock_model, disabled=True)
-            st.text_input("Auth", value=f"AWS Bedrock ({config.aws_region})", disabled=True)
+        st.markdown(f"👤 **{st.session_state.user_name}**")
+        st.caption(st.session_state.user_email)
+        st.divider()
+
+        # Qlik app selector (populated after first MCP connection)
+        app_names = ["(All apps)"] + [a["name"] for a in st.session_state.qlik_apps]
+        selected = st.selectbox(
+            "Focus on Qlik App",
+            options=app_names,
+            index=app_names.index(st.session_state.selected_app)
+                  if st.session_state.selected_app in app_names else 0,
+        )
+        st.session_state.selected_app = selected
 
         st.divider()
 
@@ -106,18 +208,38 @@ def main():
         if st.session_state.mcp_connected:
             st.success(f"MCP connected ({len(st.session_state.mcp_tools)} tools)")
         else:
-            st.info("MCP: not connected yet (connects on first message)")
+            st.info("MCP connects on first message")
+
+        st.divider()
+
+        # Session cost
+        totals = db.session_totals(st.session_state.session_id)
+        st.metric("Session cost", f"${totals['cost_usd']:.4f}")
+        total_tokens = totals["input_tokens"] + totals["output_tokens"]
+        st.caption(f"{total_tokens:,} tokens · {totals['exchanges']} exchanges")
+
+        st.divider()
+
+        # Auth info
+        if config.use_anthropic_direct:
+            st.caption(f"Claude: {config.claude_model}")
+            st.caption("Auth: Anthropic API key")
+        else:
+            st.caption(f"Claude: {config.bedrock_model}")
+            st.caption(f"Auth: AWS Bedrock ({config.aws_region})")
 
         st.divider()
 
         if st.button("Clear conversation"):
-            st.session_state.messages = []
+            st.session_state.messages      = []
             st.session_state.chat_messages = []
+            st.session_state.session_id    = db.new_session_id()
             st.rerun()
 
-        st.divider()
-        backend = "Anthropic API" if config.use_anthropic_direct else "Amazon Bedrock"
-        st.caption(f"Powered by Claude ({backend}) + Qlik Sense MCP")
+        if st.button("Sign out"):
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
+            st.rerun()
 
     # --- Chat history ---
     for msg in st.session_state.messages:
@@ -126,25 +248,37 @@ def main():
 
     # --- Chat input ---
     if user_input := st.chat_input("Ask about your Qlik data..."):
-        # Display user message
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Get response
         with st.chat_message("assistant"):
             with st.spinner("Analyzing..."):
-                loop = get_event_loop()
                 try:
                     response = loop.run_until_complete(
                         handle_user_message(user_input, config)
                     )
                 except Exception as e:
                     response = f"Error: {e}"
-
             st.markdown(response)
 
         st.session_state.messages.append({"role": "assistant", "content": response})
+        st.rerun()  # refresh sidebar cost metrics
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main():
+    db.init_db()
+    config = WebUIConfig.from_env()
+    init_session_state()
+
+    if not st.session_state.logged_in:
+        show_login(config)
+    else:
+        show_chat(config)
 
 
 if __name__ == "__main__":
