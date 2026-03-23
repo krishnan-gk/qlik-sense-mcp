@@ -13,9 +13,8 @@ from web_ui.bedrock_client import chat_with_tools, SYSTEM_PROMPT
 from web_ui import db
 
 
-@st.cache_resource
 def get_cookie_manager():
-    return stx.CookieManager()
+    return stx.CookieManager(key="qlik_cookies")
 
 
 # ---------------------------------------------------------------------------
