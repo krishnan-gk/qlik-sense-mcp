@@ -2,12 +2,20 @@
 
 import asyncio
 import json
+from datetime import datetime, timedelta
+
 import streamlit as st
+import extra_streamlit_components as stx
 
 from web_ui.config import WebUIConfig
 from web_ui.mcp_bridge import MCPBridge
 from web_ui.bedrock_client import chat_with_tools, SYSTEM_PROMPT
 from web_ui import db
+
+
+@st.cache_resource
+def get_cookie_manager():
+    return stx.CookieManager()
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +52,17 @@ def init_session_state():
     for key, val in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = val
+
+    # Auto-login from browser cookie
+    if not st.session_state.logged_in:
+        cookie_mgr = get_cookie_manager()
+        saved_email = cookie_mgr.get("qlik_user_email")
+        saved_name  = cookie_mgr.get("qlik_user_name")
+        if saved_email and saved_name:
+            db.upsert_user(saved_name, saved_email)
+            st.session_state.user_name  = saved_name
+            st.session_state.user_email = saved_email
+            st.session_state.logged_in  = True
 
 
 async def ensure_mcp_connected(config: WebUIConfig) -> MCPBridge:
@@ -169,6 +188,10 @@ def show_login(config: WebUIConfig):
             st.session_state.user_name  = name
             st.session_state.user_email = email
             st.session_state.logged_in  = True
+            expires = datetime.now() + timedelta(days=30)
+            cookie_mgr = get_cookie_manager()
+            cookie_mgr.set("qlik_user_email", email, expires_at=expires)
+            cookie_mgr.set("qlik_user_name",  name,  expires_at=expires)
             st.rerun()
 
 
@@ -185,6 +208,18 @@ def show_chat(config: WebUIConfig):
     st.title(f"{config.page_icon} {config.app_title}")
 
     loop = get_event_loop()
+
+    # Eagerly connect MCP and load app list on page render
+    if not st.session_state.apps_loaded:
+        with st.spinner("Connecting to Qlik..."):
+            try:
+                bridge = loop.run_until_complete(ensure_mcp_connected(config))
+                apps   = loop.run_until_complete(load_qlik_apps(bridge))
+                st.session_state.qlik_apps   = apps
+                st.session_state.apps_loaded = True
+                st.rerun()
+            except Exception:
+                pass  # Will retry on first message
 
     # --- Sidebar ---
     with st.sidebar:
@@ -237,6 +272,9 @@ def show_chat(config: WebUIConfig):
             st.rerun()
 
         if st.button("Sign out"):
+            cookie_mgr = get_cookie_manager()
+            cookie_mgr.delete("qlik_user_email")
+            cookie_mgr.delete("qlik_user_name")
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
