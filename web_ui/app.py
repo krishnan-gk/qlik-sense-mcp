@@ -75,25 +75,44 @@ async def ensure_mcp_connected(config: WebUIConfig) -> MCPBridge:
 
 
 async def load_qlik_apps(bridge: MCPBridge) -> list[dict]:
-    """Fetch app list from Qlik via MCP and return [{id, name}]."""
-    try:
-        raw = await bridge.call_tool("get_apps", {})
-        data = json.loads(raw)
-        # Response is {"apps": [...], "pagination": {...}} or a plain list
-        if isinstance(data, dict):
-            data = data.get("apps", [])
-        if isinstance(data, list):
-            apps = []
-            for item in data:
-                if isinstance(item, dict):
-                    app_id   = item.get("guid") or item.get("id") or item.get("appId") or item.get("qDocId", "")
-                    app_name = item.get("name") or item.get("appName") or item.get("qDocName", app_id)
-                    if app_id:
-                        apps.append({"id": app_id, "name": app_name})
-            return apps
-    except Exception:
-        pass
-    return []
+    """Fetch ALL apps from Qlik via paginated MCP calls (published + unpublished)."""
+    all_apps: dict[str, dict] = {}  # keyed by guid to deduplicate
+
+    for published_flag in [True, False]:
+        offset = 0
+        while True:
+            try:
+                raw = await bridge.call_tool("get_apps", {
+                    "limit": 50,
+                    "offset": offset,
+                    "published": published_flag,
+                })
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    page     = data.get("apps", [])
+                    has_more = data.get("pagination", {}).get("has_more", False)
+                else:
+                    page, has_more = (data if isinstance(data, list) else []), False
+
+                for item in page:
+                    if not isinstance(item, dict):
+                        continue
+                    app_id = item.get("guid") or item.get("id") or item.get("appId") or item.get("qDocId", "")
+                    if not app_id or app_id in all_apps:
+                        continue
+                    all_apps[app_id] = {
+                        "id":     app_id,
+                        "name":   item.get("name") or item.get("appName") or app_id,
+                        "stream": item.get("stream") or "",
+                    }
+
+                if not has_more:
+                    break
+                offset += 50
+            except Exception:
+                break
+
+    return list(all_apps.values())
 
 
 def build_system_prompt() -> str:
@@ -198,9 +217,15 @@ def show_login(config: WebUIConfig):
 
 def show_admin_panel(config: WebUIConfig):
     st.title("Admin Panel — App Access Control")
-    if st.button("← Back to Chat"):
-        st.session_state.show_admin = False
-        st.rerun()
+    col_back, col_refresh = st.columns([1, 1])
+    with col_back:
+        if st.button("← Back to Chat"):
+            st.session_state.show_admin = False
+            st.rerun()
+    with col_refresh:
+        if st.button("🔄 Refresh app list from Qlik"):
+            st.session_state.apps_loaded = False
+            st.rerun()
     st.caption("Enable or disable Qlik apps visible to users. Changes take effect immediately.")
 
     all_apps = db.get_all_apps()
@@ -213,24 +238,25 @@ def show_admin_panel(config: WebUIConfig):
     selected_stream = st.selectbox("Filter by stream", ["(All streams)"] + streams)
 
     # Bulk actions
+    enabled_count = sum(1 for a in all_apps if a['enabled'])
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        st.markdown(f"**{len(all_apps)} apps total** — {sum(1 for a in all_apps if a['enabled'])} enabled")
+        st.markdown(f"**{len(all_apps)} apps total** — {enabled_count} enabled")
     with col2:
-        if st.button("Enable all in stream" if selected_stream != "(All streams)" else "Enable all"):
-            if selected_stream != "(All streams)":
-                db.set_stream_enabled(selected_stream if selected_stream != "(No stream)" else "", True)
-            else:
-                for a in all_apps:
-                    db.set_app_enabled(a["id"], True)
+        btn_label = f"Enable stream" if selected_stream != "(All streams)" else "Enable all"
+        if st.button(btn_label, key="btn_enable"):
+            target_apps = [a for a in all_apps if selected_stream == "(All streams)"
+                           or (a["stream"] or "(No stream)") == selected_stream]
+            for a in target_apps:
+                db.set_app_enabled(a["id"], True)
             st.rerun()
     with col3:
-        if st.button("Disable all in stream" if selected_stream != "(All streams)" else "Disable all"):
-            if selected_stream != "(All streams)":
-                db.set_stream_enabled(selected_stream if selected_stream != "(No stream)" else "", False)
-            else:
-                for a in all_apps:
-                    db.set_app_enabled(a["id"], False)
+        btn_label2 = f"Disable stream" if selected_stream != "(All streams)" else "Disable all"
+        if st.button(btn_label2, key="btn_disable"):
+            target_apps = [a for a in all_apps if selected_stream == "(All streams)"
+                           or (a["stream"] or "(No stream)") == selected_stream]
+            for a in target_apps:
+                db.set_app_enabled(a["id"], False)
             st.rerun()
 
     st.divider()
