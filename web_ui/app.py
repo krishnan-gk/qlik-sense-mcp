@@ -108,7 +108,7 @@ async def load_qlik_apps(bridge: MCPBridge) -> list[dict]:
 
                 if not has_more:
                     break
-                offset += 50
+                offset += 1000
             except Exception:
                 break
 
