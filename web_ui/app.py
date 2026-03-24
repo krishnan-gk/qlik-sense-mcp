@@ -83,7 +83,7 @@ async def load_qlik_apps(bridge: MCPBridge) -> list[dict]:
         while True:
             try:
                 raw = await bridge.call_tool("get_apps", {
-                    "limit": 50,
+                    "limit": 1000,
                     "offset": offset,
                     "published": published_flag,
                 })
